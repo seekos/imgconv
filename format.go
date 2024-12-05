@@ -1,8 +1,10 @@
 package imgconv
 
 import (
-	"errors"
+	"encoding"
+	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/gif"
 	"image/jpeg"
@@ -11,9 +13,14 @@ import (
 	"strings"
 
 	"github.com/sunshineplan/pdf"
-	"github.com/sunshineplan/tiff" // decode tiff format, not check IFD tags order
 	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp" // decode webp format
+)
+
+var (
+	_ encoding.TextUnmarshaler = new(Format)
+	_ encoding.TextMarshaler   = Format(0)
 )
 
 // Format is an image file format.
@@ -29,14 +36,56 @@ const (
 	PDF
 )
 
-var formatExts = map[Format]string{
-	JPEG: "jpg",
-	PNG:  "png",
-	GIF:  "gif",
-	TIFF: "tif",
-	BMP:  "bmp",
-	PDF:  "pdf",
+var formatExts = [][]string{
+	{"jpg", "jpeg"},
+	{"png"},
+	{"gif"},
+	{"tif", "tiff"},
+	{"bmp"},
+	{"pdf"},
 }
+
+func (f Format) String() (format string) {
+	defer func() {
+		if err := recover(); err != nil {
+			format = "unknown"
+		}
+	}()
+	return formatExts[f][0]
+}
+
+// FormatFromExtension parses image format from filename extension:
+// "jpg" (or "jpeg"), "png", "gif", "tif" (or "tiff"), "bmp" and "pdf" are supported.
+func FormatFromExtension(ext string) (Format, error) {
+	ext = strings.ToLower(ext)
+	for index, exts := range formatExts {
+		for _, i := range exts {
+			if ext == i {
+				return Format(index), nil
+			}
+		}
+	}
+
+	return -1, image.ErrFormat
+}
+
+func (f *Format) UnmarshalText(text []byte) error {
+	format, err := FormatFromExtension(string(text))
+	if err != nil {
+		return err
+	}
+	*f = format
+	return nil
+}
+
+func (f Format) MarshalText() ([]byte, error) {
+	return []byte(f.String()), nil
+}
+
+var (
+	_ encoding.TextUnmarshaler = new(TIFFCompression)
+	_ encoding.TextMarshaler   = TIFFCompression(0)
+)
 
 // TIFFCompression describes the type of compression used in Options.
 type TIFFCompression int
@@ -45,26 +94,40 @@ type TIFFCompression int
 const (
 	TIFFUncompressed TIFFCompression = iota
 	TIFFDeflate
-	TIFFLZW
-	TIFFCCITTGroup3
-	TIFFCCITTGroup4
-	TIFFJPEG
 )
+
+var tiffCompression = []string{
+	"none",
+	"deflate",
+}
 
 func (c TIFFCompression) value() tiff.CompressionType {
 	switch c {
-	case TIFFLZW:
-		return tiff.LZW
 	case TIFFDeflate:
 		return tiff.Deflate
-	case TIFFCCITTGroup3:
-		return tiff.CCITTGroup3
-	case TIFFCCITTGroup4:
-		return tiff.CCITTGroup4
-	case TIFFJPEG:
-		return tiff.JPEG
 	}
 	return tiff.Uncompressed
+}
+
+func (c *TIFFCompression) UnmarshalText(text []byte) error {
+	t := strings.ToLower(string(text))
+	for index, tt := range tiffCompression {
+		if t == tt {
+			*c = TIFFCompression(index)
+			return nil
+		}
+	}
+	return fmt.Errorf("tiff: unsupported compression: %s", t)
+}
+
+func (c TIFFCompression) MarshalText() (b []byte, err error) {
+	defer func() {
+		if err := recover(); err != nil {
+			b = []byte("unknown")
+		}
+	}()
+	ct := tiffCompression[c]
+	return []byte(ct), nil
 }
 
 // FormatOption is format option
@@ -80,6 +143,7 @@ type encodeConfig struct {
 	gifDrawer           draw.Drawer
 	pngCompressionLevel png.CompressionLevel
 	tiffCompressionType TIFFCompression
+	background          color.Color
 }
 
 var defaultEncodeConfig = encodeConfig{
@@ -88,7 +152,7 @@ var defaultEncodeConfig = encodeConfig{
 	gifQuantizer:        nil,
 	gifDrawer:           nil,
 	pngCompressionLevel: png.DefaultCompression,
-	tiffCompressionType: TIFFLZW,
+	tiffCompressionType: TIFFDeflate,
 }
 
 // EncodeOption sets an optional parameter for the Encode and Save functions.
@@ -143,29 +207,11 @@ func TIFFCompressionType(compressionType TIFFCompression) EncodeOption {
 	}
 }
 
-// FormatFromExtension parses image format from filename extension:
-// "jpg" (or "jpeg"), "png", "gif", "tif" (or "tiff"), "bmp" and "pdf" are supported.
-func FormatFromExtension(ext string) (Format, error) {
-	ext = strings.ToLower(ext)
-	for k, v := range formatExts {
-		if ext == v {
-			return k, nil
-		}
+// BackgroundColor returns an EncodeOption that sets the background color.
+func BackgroundColor(color color.Color) EncodeOption {
+	return func(c *encodeConfig) {
+		c.background = color
 	}
-
-	return -1, errors.New("unsupported image format")
-}
-
-func setFormat(filename string, options ...EncodeOption) (fo FormatOption, err error) {
-	var format Format
-	if format, err = FormatFromExtension(filename); err != nil {
-		return
-	}
-
-	fo.Format = format
-	fo.EncodeOption = options
-
-	return
 }
 
 // Encode writes the image img to w in the specified format (JPEG, PNG, GIF, TIFF, BMP or PDF).
@@ -173,6 +219,13 @@ func (f *FormatOption) Encode(w io.Writer, img image.Image) error {
 	cfg := defaultEncodeConfig
 	for _, option := range f.EncodeOption {
 		option(&cfg)
+	}
+
+	if cfg.background != nil {
+		i := image.NewNRGBA(img.Bounds())
+		draw.Draw(i, i.Bounds(), &image.Uniform{cfg.background}, img.Bounds().Min, draw.Src)
+		draw.Draw(i, i.Bounds(), img, img.Bounds().Min, draw.Over)
+		img = i
 	}
 
 	switch f.Format {
@@ -208,5 +261,5 @@ func (f *FormatOption) Encode(w io.Writer, img image.Image) error {
 		return pdf.Encode(w, []image.Image{img}, &pdf.Options{Quality: cfg.Quality})
 	}
 
-	return errors.New("unsupported image format")
+	return image.ErrFormat
 }
