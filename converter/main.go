@@ -1,43 +1,49 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"image"
-	"io"
+	"image/color"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/sunshineplan/imgconv"
+	"github.com/sunshineplan/utils/flags"
+	"github.com/sunshineplan/utils/log"
 	"github.com/sunshineplan/utils/progressbar"
-	"github.com/sunshineplan/utils/workers"
-	"github.com/vharitonsky/iniflags"
+	"github.com/sunshineplan/workers"
 )
 
 var (
-	src         = flag.String("src", "", "")
-	dst         = flag.String("dst", "output", "")
-	force       = flag.Bool("force", false, "")
-	format      = flag.String("format", "jpg", "")
-	gray        = flag.Bool("gray", false, "")
-	quality     = flag.Int("quality", 75, "")
-	compression = flag.String("compression", "lzw", "")
-	watermark   = flag.String("watermark", "", "")
-	opacity     = flag.Uint("opacity", 128, "")
-	random      = flag.Bool("random", false, "")
-	offsetX     = flag.Int("x", 0, "")
-	offsetY     = flag.Int("y", 0, "")
-	width       = flag.Int("width", 0, "")
-	height      = flag.Int("height", 0, "")
-	percent     = flag.Float64("percent", 0, "")
-	worker      = flag.Int("worker", 5, "")
-	debug       = flag.Bool("debug", false, "")
+	src             = flag.String("src", "", "")
+	dst             = flag.String("dst", "output", "")
+	test            = flag.Bool("test", false, "")
+	force           = flag.Bool("force", false, "")
+	pdf             = flag.Bool("pdf", false, "")
+	whiteBackground = flag.Bool("white-background", false, "")
+	gray            = flag.Bool("gray", false, "")
+	quality         = flag.Int("quality", 75, "")
+	autoOrientation = flag.Bool("auto-orientation", false, "")
+	watermark       = flag.String("watermark", "", "")
+	opacity         = flag.Uint("opacity", 128, "")
+	random          = flag.Bool("random", false, "")
+	offsetX         = flag.Int("x", 0, "")
+	offsetY         = flag.Int("y", 0, "")
+	width           = flag.Int("width", 0, "")
+	height          = flag.Int("height", 0, "")
+	percent         = flag.Float64("percent", 0, "")
+	worker          = flag.Int("worker", 5, "")
+	quiet           = flag.Bool("q", false, "")
+	debug           = flag.Bool("debug", false, "")
+
+	format      imgconv.Format
+	compression imgconv.TIFFCompression
 )
 
 func usage() {
@@ -47,16 +53,24 @@ func usage() {
 		source file or directory
   --dst
 		destination directory (default: output)
+  --test
+		test source file only, don't convert (default: false)
   --force
 		force overwrite (default: false)
+  --pdf
+		convert pdf source (default: false)
   --format
 		output format (jpg, jpeg, png, gif, tif, tiff, bmp and pdf are supported, default: jpg)
+  --white-background
+		use white color for transparent background (default: false)
   --gray
 		convert to grayscale (default: false)
   --quality
 		set jpeg or pdf quality (range 1-100, default: 75)
   --compression
-		set tiff compression type (none, lzw, jpeg, deflate, default: lzw)
+		set tiff compression type (none, deflate, default: deflate)
+  --auto-orientation
+		auto orientation (default: false)
   --watermark
 		watermark path
   --opacity
@@ -76,6 +90,15 @@ func usage() {
 func main() {
 	var code int
 	defer func() {
+		if err := recover(); err != nil {
+			if err == flag.ErrHelp {
+				return
+			}
+			log.Error("Panic", "error", err)
+			if code == 0 {
+				code = 1
+			}
+		}
 		fmt.Println("Press enter key to exit . . .")
 		fmt.Scanln()
 		os.Exit(code)
@@ -83,60 +106,77 @@ func main() {
 
 	self, err := os.Executable()
 	if err != nil {
-		log.Println("Failed to get self path", err)
+		log.Error("Failed to get self path", "error", err)
 		code = 1
 		return
 	}
 
+	flag.CommandLine.Init(os.Args[0], flag.PanicOnError)
 	flag.Usage = usage
-	iniflags.SetConfigFile(filepath.Join(filepath.Dir(self), "config.ini"))
-	iniflags.SetAllowMissingConfigFile(true)
-	iniflags.Parse()
+	flag.TextVar(&format, "format", imgconv.JPEG, "")
+	flag.TextVar(&compression, "compression", imgconv.TIFFDeflate, "")
+	flags.SetConfigFile(filepath.Join(filepath.Dir(self), "config.ini"))
+	flags.Parse()
 
-	f, err := os.OpenFile(
-		filepath.Join(filepath.Dir(self), fmt.Sprintf("convert%s.log", time.Now().Format("20060102150405"))),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	log.SetOutput(filepath.Join(filepath.Dir(self), fmt.Sprintf("convert%s.log", time.Now().Format("20060102150405"))), os.Stdout)
+	if *debug {
+		log.SetLevel(slog.LevelDebug)
+	}
+
+	srcInfo, err := os.Stat(*src)
 	if err != nil {
-		log.Println("Failed to open log file:", err)
+		log.Error("Failed to get FileInfo of source", "source", *src, "error", err)
 		code = 1
 		return
 	}
-	defer f.Close()
 
-	log.SetOutput(io.MultiWriter(f, os.Stdout))
+	if *test {
+		switch {
+		case srcInfo.Mode().IsDir():
+			images := loadImages(*src, *pdf)
+			total := len(images)
+			log.Println("Total images:", total)
+			pb := progressbar.New(total)
+			pb.Start()
+			workers.Workers(*worker).Run(context.Background(), workers.SliceJob(images, func(_ int, image string) {
+				defer pb.Add(1)
+				if _, err := open(image); err != nil {
+					log.Error("Bad image", "image", image, "error", err)
+				}
+			}))
+			pb.Done()
+		case srcInfo.Mode().IsRegular():
+			if _, err := open(*src); err != nil {
+				log.Error("Bad image", "image", *src, "error", err)
+			}
+		default:
+			log.Error("Unknown source mode", "mode", srcInfo.Mode())
+			code = 1
+		}
+		return
+	}
 
 	task := imgconv.NewOptions()
 
-	var ct imgconv.TIFFCompression
-	switch strings.ToLower(*compression) {
-	case "none":
-		ct = imgconv.TIFFUncompressed
-	case "lzw":
-		ct = imgconv.TIFFLZW
-	case "jpeg":
-		ct = imgconv.TIFFJPEG
-	case "deflate":
-		ct = imgconv.TIFFDeflate
-	default:
-		log.Println("Unknown tiff compression type:", ct)
-		code = 1
-		return
+	var opts []imgconv.EncodeOption
+	if format == imgconv.JPEG || format == imgconv.PDF {
+		opts = append(opts, imgconv.Quality(*quality))
 	}
-
-	if err := task.SetFormat(*format, imgconv.Quality(*quality), imgconv.TIFFCompressionType(ct)); err != nil {
-		log.Print(err)
-		code = 1
-		return
+	if format == imgconv.TIFF {
+		opts = append(opts, imgconv.TIFFCompressionType(compression))
 	}
+	if *whiteBackground {
+		opts = append(opts, imgconv.BackgroundColor(color.White))
+	}
+	task.SetFormat(format, opts...)
 
 	if *gray {
 		task.SetGray(true)
 	}
-
 	if *watermark != "" {
 		mark, err := imgconv.Open(*watermark)
 		if err != nil {
-			log.Print(err)
+			log.Error("Failed to open watermark", "watermark", *watermark, "error", err)
 			code = 1
 			return
 		}
@@ -147,169 +187,71 @@ func main() {
 		task.SetResize(*width, *height, *percent)
 	}
 
-	srcInfo, err := os.Stat(*src)
-	if err != nil {
-		log.Print(err)
-		code = 1
-		return
-	}
-
 	dstInfo, err := os.Stat(*dst)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if err := os.MkdirAll(*dst, 0755); err != nil {
-				log.Print(err)
+				log.Error("Failed to create directory for destination", "destination", *dst, "error", err)
 				code = 1
 				return
 			}
 			dstInfo, _ = os.Stat(*dst)
 		} else {
-			log.Print(err)
+			log.Error("Failed to get FileInfo of destination", "destination", *dst, "error", err)
 			code = 1
 			return
 		}
 	}
-	if !dstInfo.Mode().IsDir() {
-		log.Print("Destination is not a directory.")
-		code = 1
-		return
-	}
 
-	switch mode := srcInfo.Mode(); {
-	case mode.IsDir():
-		var message string
-		var lastPath string
-		var lastWidth int
-		var images []string
-
-		ticker := time.NewTicker(time.Second)
-		done := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case <-done:
-					ticker.Stop()
-					return
-				case <-ticker.C:
-					m := message
-					io.WriteString(
-						os.Stderr,
-						fmt.Sprintf("\r%s\r%s", strings.Repeat(" ", lastWidth), m),
-					)
-					lastWidth = len(m)
-				}
-			}
-		}()
-
-		filepath.WalkDir(*src, func(path string, d fs.DirEntry, _ error) error {
-			if ok, _ := regexp.MatchString(`^\.(jpe?g|png|gif|tiff?|bmp|pdf|webp)$`,
-				strings.ToLower(filepath.Ext(d.Name()))); ok {
-				images = append(images, path)
-			}
-
-			if d.IsDir() {
-				lastPath = filepath.Dir(path)
-			}
-			message = fmt.Sprintf("Found images: %d, Scanning directory %s", len(images), lastPath)
-
-			return nil
-		})
-		close(done)
-
+	switch {
+	case srcInfo.Mode().IsDir():
+		if !dstInfo.Mode().IsDir() {
+			log.Error("Destination is not a directory", "destination", *dst)
+			code = 1
+			return
+		}
+		images := loadImages(*src, *pdf)
 		total := len(images)
-
-		io.WriteString(os.Stderr, fmt.Sprintf("\r%s\r", strings.Repeat(" ", lastWidth)))
 		log.Println("Total images:", total)
-
 		pb := progressbar.New(total)
-		pb.Start()
-		workers.New(*worker).Slice(images, func(_ int, i interface{}) {
+		if !*quiet {
+			pb.Start()
+		}
+		workers.Workers(*worker).Run(context.Background(), workers.SliceJob(images, func(_ int, image string) {
 			defer pb.Add(1)
-
-			rel, err := filepath.Rel(*src, i.(string))
+			rel, err := filepath.Rel(*src, image)
 			if err != nil {
-				log.Println(i, err)
+				log.Error("Failed to get relative path", "source", *src, "image", image, "error", err)
 				return
 			}
 			output := task.ConvertExt(filepath.Join(*dst, rel))
-			path := filepath.Dir(output)
-
-			if _, err := os.Stat(output); !errors.Is(err, fs.ErrNotExist) && !*force {
-				log.Println("Skip", output)
+			if err := convert(task, image, output, *force); err != nil {
+				if err == errSkip && !*quiet {
+					log.Println("Skip", output)
+				}
 				return
 			}
-			if err := os.MkdirAll(path, 0755); err != nil {
-				log.Print(err)
-				return
+			log.Debug("Converted " + image)
+		}))
+		if !*quiet {
+			pb.Done()
+		}
+	case srcInfo.Mode().IsRegular():
+		output := *dst
+		if dstInfo.Mode().IsDir() {
+			output = task.ConvertExt(filepath.Join(output, srcInfo.Name()))
+		}
+		if err := convert(task, *src, output, *force); err != nil {
+			if err == errSkip {
+				log.Error("Destination already exist", "destination", output)
 			}
-
-			img, err := imgconv.Open(i.(string))
-			if err != nil {
-				log.Println(i, err)
-				return
-			}
-
-			f, err := os.CreateTemp(path, "*.tmp")
-			if err != nil {
-				log.Print(err)
-				return
-			}
-
-			if err := task.Convert(f, img); err != nil {
-				log.Println(i, err)
-				return
-			}
-			f.Close()
-
-			os.Rename(f.Name(), output)
-
-			if *debug {
-				log.Printf("[Debug]Converted %s\n", i.(string))
-			}
-		})
-		pb.Done()
-
-	case mode.IsRegular():
-		output := task.ConvertExt(filepath.Join(*dst, filepath.Base(*src)))
-		path := filepath.Dir(output)
-
-		if _, err := os.Stat(output); !errors.Is(err, fs.ErrNotExist) && !*force {
-			log.Print("Destination already exist.")
 			code = 1
 			return
 		}
-		if err := os.MkdirAll(path, 0755); err != nil {
-			log.Print(err)
-			code = 1
-			return
-		}
-
-		base, err := imgconv.Open(*src)
-		if err != nil {
-			log.Print(err)
-			code = 1
-			return
-		}
-
-		f, err := os.CreateTemp(path, "*.tmp")
-		if err != nil {
-			log.Print(err)
-			code = 1
-			return
-		}
-
-		if err := task.Convert(f, base); err != nil {
-			log.Print(err)
-			code = 1
-			return
-		}
-		f.Close()
-
-		os.Rename(f.Name(), output)
-
 	default:
-		log.Print("Unknown source.")
+		log.Error("Unknown source mode", "mode", srcInfo.Mode())
 		code = 1
+		return
 	}
-	log.Print("Done.")
+	log.Print("Done")
 }

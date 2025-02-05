@@ -12,22 +12,41 @@ jobs:
         os: [ windows-latest, ubuntu-latest, macos-latest ]
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.x'
+          go-version: stable
 
       - name: Test Code
+        id: test
         run: |
           go build -v ./...
           go test -v -race ./...
           cd converter
           go mod tidy
           go build -v ./...
+          go clean
+          cd ..
+
+      - name: Check New Data
+        id: check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff-index --quiet HEAD || echo "new_data=1" >> $GITHUB_OUTPUT
+          echo "date=$(TZ=PRC date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Commit
+        if: steps.check.outputs.new_data == 1
+        run: |
+          git commit -m ${{ steps.check.outputs.date }}
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
 
   merge:
     if: ${{ github.actor == 'dependabot[bot]' }}
@@ -37,8 +56,8 @@ jobs:
       pull-requests: write
       contents: write
     steps:
-      - uses: actions/checkout@v2
-      - uses: nick-invision/retry@v2
+      - uses: actions/checkout@v4
+      - uses: nick-invision/retry@v3
         with:
           timeout_minutes: 60
           max_attempts: 5

@@ -4,10 +4,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"math/rand"
-	"time"
-
-	"github.com/disintegration/imaging"
+	"math/rand/v2"
 )
 
 // WatermarkOption is watermark option
@@ -19,7 +16,7 @@ type WatermarkOption struct {
 }
 
 // Watermark add watermark to image
-func Watermark(base image.Image, option WatermarkOption) image.Image {
+func Watermark(base image.Image, option *WatermarkOption) image.Image {
 	return option.do(base)
 }
 
@@ -36,22 +33,21 @@ func (w *WatermarkOption) SetOffset(offset image.Point) *WatermarkOption {
 }
 
 func (w *WatermarkOption) do(base image.Image) image.Image {
-	img := image.NewRGBA(base.Bounds())
+	img := image.NewNRGBA(base.Bounds())
 	draw.Draw(img, img.Bounds(), base, image.Point{}, draw.Src)
 	var offset image.Point
 	var mark image.Image
 	if w.Random {
-		rand.Seed(time.Now().UnixNano())
 		if w.Mark.Bounds().Dx() >= base.Bounds().Dx()/3 || w.Mark.Bounds().Dy() >= base.Bounds().Dy()/3 {
 			if calcResizeXY(base.Bounds(), w.Mark.Bounds()) {
-				mark = Resize(w.Mark, ResizeOption{Width: base.Bounds().Dx() / 3})
+				mark = Resize(w.Mark, &ResizeOption{Width: base.Bounds().Dx() / 3})
 			} else {
-				mark = Resize(w.Mark, ResizeOption{Height: base.Bounds().Dy() / 3})
+				mark = Resize(w.Mark, &ResizeOption{Height: base.Bounds().Dy() / 3})
 			}
 		} else {
 			mark = w.Mark
 		}
-		mark = imaging.Rotate(mark, float64(randRange(-30, 30))+rand.Float64(), color.Transparent)
+		mark = rotate(mark, float64(randRange(-30, 30))+rand.Float64(), color.Transparent)
 		offset = image.Pt(
 			randRange(base.Bounds().Dx()/6, base.Bounds().Dx()*5/6-mark.Bounds().Dx()),
 			randRange(base.Bounds().Dy()/6, base.Bounds().Dy()*5/6-mark.Bounds().Dy()))
@@ -76,7 +72,10 @@ func (w *WatermarkOption) do(base image.Image) image.Image {
 }
 
 func randRange(min, max int) int {
-	return rand.Intn(max-min+1) + min
+	if max < min {
+		min, max = max, min
+	}
+	return rand.N(max-min+1) + min
 }
 
 func calcResizeXY(base, mark image.Rectangle) bool {

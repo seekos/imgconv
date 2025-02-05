@@ -17,12 +17,7 @@ as an input, include jpg(jpeg), png, gif, tif(tiff), bmp, webp(decode only) and 
 
 ## Installation
 
-	Required go version for building: go1.16 and up
     go get -u github.com/sunshineplan/imgconv
-
-## Documentation
-
-https://pkg.go.dev/github.com/sunshineplan/imgconv
 
 ## License
 
@@ -44,30 +39,40 @@ A few usage examples can be found below. See the documentation for the full list
 
 ```go
 // Resize srcImage to size = 128x128px.
-dstImage128 := imgconv.Resize(srcImage, imgconv.ResizeOption{Width: 128, Height: 128})
+dstImage128 := imgconv.Resize(srcImage, &imgconv.ResizeOption{Width: 128, Height: 128})
 
 // Resize srcImage to width = 800px preserving the aspect ratio.
-dstImage800 := imgconv.Resize(srcImage, imgconv.ResizeOption{Width: 800})
+dstImage800 := imgconv.Resize(srcImage, &imgconv.ResizeOption{Width: 800})
 
 // Resize srcImage to 50% size preserving the aspect ratio.
-dstImagePercent50 := imgconv.Resize(srcImage, imgconv.ResizeOption{Percent: 50})
+dstImagePercent50 := imgconv.Resize(srcImage, &imgconv.ResizeOption{Percent: 50})
+```
+
+### Image splitting
+
+```go
+// Split srcImage into 3 parts horizontally.
+imgs, err := imgconv.Split(srcImage, 3, imgconv.SplitHorizontalMode)
+
+// Split srcImage into 3 parts vertically.
+imgs, err := imgconv.Split(srcImage, 3, imgconv.SplitVerticalMode)
 ```
 
 ### Add watermark
 
 ```go
 // srcImage add a watermark at randomly position.
-dstImage := imgconv.Watermark(srcImage, WatermarkOption{Mark: markImage, Opacity: 128, Random: true})
+dstImage := imgconv.Watermark(srcImage, &WatermarkOption{Mark: markImage, Opacity: 128, Random: true})
 
 // srcImage add a watermark at fixed position with offset.
-dstImage := imgconv.Watermark(srcImage, WatermarkOption{Mark: markImage, Opacity: 128, Offset: image.Pt(5, 5)})
+dstImage := imgconv.Watermark(srcImage, &WatermarkOption{Mark: markImage, Opacity: 128, Offset: image.Pt(5, 5)})
 ```
 
 ### Format convert
 
 ```go
 // Convert srcImage to dst with jpg format.
-imgconv.Write(srcImage, dstWriter, imgconv.FormatOption{Format: imgconv.JPEG})
+imgconv.Write(dstWriter, srcImage, &imgconv.FormatOption{Format: imgconv.JPEG})
 ```
 
 ## Example code
@@ -90,15 +95,20 @@ func main() {
 	}
 
 	// Resize the image to width = 200px preserving the aspect ratio.
-	mark := imgconv.Resize(src, imgconv.ResizeOption{Width: 200})
+	mark := imgconv.Resize(src, &imgconv.ResizeOption{Width: 200})
 
 	// Add random watermark set opacity = 128.
-	dst := imgconv.Watermark(src, imgconv.WatermarkOption{Mark: mark, Opacity: 128, Random: true})
+	dst := imgconv.Watermark(src, &imgconv.WatermarkOption{Mark: mark, Opacity: 128, Random: true})
 
 	// Write the resulting image as TIFF.
-	err = imgconv.Write(io.Discard, dst, imgconv.FormatOption{Format: imgconv.TIFF})
-	if err != nil {
+	if err := imgconv.Write(io.Discard, dst, &imgconv.FormatOption{Format: imgconv.TIFF}); err != nil {
 		log.Fatalf("failed to write image: %v", err)
+	}
+
+	// Split the image into 3 parts horizontally.
+	imgs, err := imgconv.Split(src, 3, imgconv.SplitHorizontalMode)
+	if err != nil {
+		log.Fatalf("failed to split image: %v", err)
 	}
 }
 ```

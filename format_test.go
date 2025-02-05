@@ -2,6 +2,7 @@ package imgconv
 
 import (
 	"bytes"
+	"flag"
 	"image"
 	"image/draw"
 	"image/png"
@@ -9,12 +10,54 @@ import (
 	"testing"
 )
 
-func TestSetFormat(t *testing.T) {
-	if _, err := setFormat("Jpg"); err != nil {
-		t.Fatal("Failed to set format")
+func TestFormatFromExtension(t *testing.T) {
+	if _, err := FormatFromExtension("Jpg"); err != nil {
+		t.Fatal("jpg format want no error")
 	}
-	if _, err := setFormat("txt"); err == nil {
-		t.Fatal("set txt format want error")
+	if _, err := FormatFromExtension("TIFF"); err != nil {
+		t.Fatal("tiff format want no error")
+	}
+	if _, err := FormatFromExtension("txt"); err == nil {
+		t.Fatal("txt format want error")
+	}
+}
+
+func TestTextVar(t *testing.T) {
+	testCase1 := []struct {
+		argument string
+		format   Format
+	}{
+		{"Jpg", JPEG},
+		{"TIFF", TIFF},
+		{"txt", Format(-1)},
+	}
+	for _, tc := range testCase1 {
+		f := flag.NewFlagSet("test", flag.ContinueOnError)
+		f.SetOutput(io.Discard)
+		var format Format
+		f.TextVar(&format, "f", Format(-1), "")
+		f.Parse(append([]string{"-f"}, tc.argument))
+		if format != tc.format {
+			t.Errorf("expected %s format; got %s", tc.format, format)
+		}
+	}
+	testCase2 := []struct {
+		argument    string
+		compression TIFFCompression
+	}{
+		{"none", TIFFUncompressed},
+		{"Deflate", TIFFDeflate},
+		{"lzw", TIFFCompression(-1)},
+	}
+	for _, tc := range testCase2 {
+		f := flag.NewFlagSet("test", flag.ContinueOnError)
+		f.SetOutput(io.Discard)
+		var compression TIFFCompression
+		f.TextVar(&compression, "c", TIFFCompression(-1), "")
+		f.Parse(append([]string{"-c"}, tc.argument))
+		if compression != tc.compression {
+			t.Errorf("expected %d compression; got %d", tc.compression, compression)
+		}
 	}
 }
 
@@ -23,8 +66,7 @@ func TestEncode(t *testing.T) {
 		{Format: JPEG, EncodeOption: []EncodeOption{Quality(75)}},
 		{Format: PNG, EncodeOption: []EncodeOption{PNGCompressionLevel(png.DefaultCompression)}},
 		{Format: GIF, EncodeOption: []EncodeOption{GIFNumColors(256), GIFDrawer(draw.FloydSteinberg), GIFQuantizer(nil)}},
-		{Format: TIFF, EncodeOption: []EncodeOption{TIFFCompressionType(TIFFLZW)}},
-		{Format: TIFF, EncodeOption: []EncodeOption{TIFFCompressionType(TIFFJPEG)}},
+		{Format: TIFF, EncodeOption: []EncodeOption{TIFFCompressionType(TIFFDeflate)}},
 		{Format: BMP},
 		{Format: PDF, EncodeOption: []EncodeOption{Quality(75)}},
 	}
@@ -38,11 +80,7 @@ func TestEncode(t *testing.T) {
 	for _, tc := range testCase {
 		// Encode the image.
 		var buf bytes.Buffer
-		fo, err := setFormat(formatExts[tc.Format], tc.EncodeOption...)
-		if err != nil {
-			t.Fatal(tc, err)
-		}
-
+		fo := &FormatOption{tc.Format, tc.EncodeOption}
 		if err := fo.Encode(&buf, m0); err != nil {
 			t.Fatal(formatExts[fo.Format], err)
 		}
